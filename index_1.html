@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>3D Book</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #1a1a1a; }
+  #canvas-container { width: 100%; height: 100%; }
+  #status {
+    position: fixed; top: 12px; left: 12px; color: #ddd;
+    font-family: system-ui, sans-serif; font-size: 14px;
+    background: rgba(0,0,0,0.5); padding: 6px 10px; border-radius: 6px;
+  }
+</style>
+</head>
+<body>
+<div id="canvas-container"></div>
+<div id="status">Loading book...</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.165.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from "three";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
+
+const container = document.getElementById("canvas-container");
+const statusEl = document.getElementById("status");
+
+// ---------- Renderer ----------
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(container.clientWidth, container.clientHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+container.appendChild(renderer.domElement);
+
+// ---------- Scene / Camera ----------
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a1a1a);
+
+const camera = new THREE.PerspectiveCamera(
+  40,
+  container.clientWidth / container.clientHeight,
+  0.01,
+  10
+);
+camera.position.set(0.35, 0.25, 0.45);
+
+// ---------- Studio-style environment lighting (no external HDRI file needed) ----------
+const pmremGenerator = new THREE.PMREMGenerator(renderer);
+scene.environment = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
+
+// A couple of extra lights to add some directional shading/shadow feel on top of the environment
+const keyLight = new THREE.DirectionalLight(0xffffff, 1.2);
+keyLight.position.set(1, 1.5, 1);
+scene.add(keyLight);
+
+const fillLight = new THREE.DirectionalLight(0xffffff, 0.4);
+fillLight.position.set(-1, 0.5, -0.5);
+scene.add(fillLight);
+
+// ---------- Camera controls (temporary -- just to look at it for now) ----------
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0, 0);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.minDistance = 0.15;
+controls.maxDistance = 1.0;
+controls.update();
+
+// ---------- Load the book ----------
+// IMPORTANT: put your exported .glb next to this index.html and update the filename below
+const GLB_PATH = "book.glb";
+
+const loader = new GLTFLoader();
+let bookRoot = null;
+
+loader.load(
+  GLB_PATH,
+  (gltf) => {
+    bookRoot = gltf.scene;
+    scene.add(bookRoot);
+
+    // Auto-center and auto-frame the camera based on the model's actual size,
+    // since we don't know your book's exact export scale/position yet.
+    const box = new THREE.Box3().setFromObject(bookRoot);
+    const size = box.getSize(new THREE.Vector3());
+    const center = box.getCenter(new THREE.Vector3());
+    bookRoot.position.sub(center); // recenter model at origin
+
+    const maxDim = Math.max(size.x, size.y, size.z);
+    camera.position.set(maxDim * 1.4, maxDim * 1.0, maxDim * 1.8);
+    controls.target.set(0, 0, 0);
+    controls.minDistance = maxDim * 0.5;
+    controls.maxDistance = maxDim * 4;
+    controls.update();
+
+    statusEl.textContent = "Loaded. Objects found: " +
+      countNamedObjects(bookRoot);
+    console.log("Book hierarchy:", bookRoot);
+  },
+  (progress) => {
+    if (progress.total) {
+      const pct = Math.round((progress.loaded / progress.total) * 100);
+      statusEl.textContent = `Loading book... ${pct}%`;
+    }
+  },
+  (error) => {
+    statusEl.textContent = "Failed to load book.glb -- check filename/path (see console).";
+    console.error(error);
+  }
+);
+
+function countNamedObjects(root) {
+  let n = 0;
+  root.traverse((obj) => { if (obj.isMesh) n++; });
+  return n;
+}
+
+// ---------- Resize handling ----------
+window.addEventListener("resize", () => {
+  camera.aspect = container.clientWidth / container.clientHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(container.clientWidth, container.clientHeight);
+});
+
+// ---------- Render loop ----------
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+</script>
+</body>
+</html>
