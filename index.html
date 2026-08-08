@@ -66,7 +66,7 @@ ALL_NAMES.forEach((n) => { current[n] = 0; target[n] = 0; });
 // ============================================================
 // Renderer / Scene / Camera
 // ============================================================
-const renderer = new THREE.WebGLRenderer({ antialias: true });
+const renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true });
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setSize(container.clientWidth, container.clientHeight);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -77,7 +77,7 @@ container.appendChild(renderer.domElement);
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x1a1a1a);
 
-const camera = new THREE.PerspectiveCamera(40, container.clientWidth / container.clientHeight, 0.01, 10);
+const camera = new THREE.PerspectiveCamera(40, container.clientWidth / container.clientHeight, 0.05, 2.5);
 camera.position.set(0.35, 0.25, 0.45);
 
 const pmremGenerator = new THREE.PMREMGenerator(renderer);
