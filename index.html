@@ -44,11 +44,17 @@ const NUM_LEAVES = 15;
 const MAX_COVER_ANGLE = 155;      // degrees, same as Blender
 const ROTATION_AXIS = "y";        // Blender Z-rotation usually becomes Three.js Y after glTF export
 const DRAG_PIXELS_FOR_FULL_SWING = 260; // drag this many px sideways = full 0-155 deg swing; tune to taste
-const LERP_SPEED = 10;            // higher = snappier follow, lower = more "weighted"/laggy feel
+const LERP_SPEED = 10;            // higher = snappier follow, lower = more "weighted"/laggy feel -- only applies to the object you're actively dragging
 
 // Order matters: each page is clamped by the one before it. Page 1 is clamped by Cover_Front.
 const PAGE_NAMES = Array.from({ length: NUM_LEAVES }, (_, i) => `Page_${String(i + 1).padStart(2, "0")}`);
 const ALL_NAMES = ["Cover_Front", "Cover_Back", ...PAGE_NAMES];
+
+// Which way a rightward mouse-drag should count for each object.
+// Front cover + all pages open on drag LEFT (per your report); back cover already correct on drag LEFT too,
+// but its underlying rotation sign is opposite -- see applyRotation().
+const DRAG_SIGN = { Cover_Front: -1, Cover_Back: 1 };
+PAGE_NAMES.forEach((n) => { DRAG_SIGN[n] = -1; });
 
 // current (smoothed) and target angles in degrees, per object name
 const current = {};
@@ -163,7 +169,6 @@ function pickControllableName(ev) {
   const meshes = Object.values(nodes);
   const hits = raycaster.intersectObjects(meshes, true);
   if (hits.length === 0) return null;
-  // walk up from the hit object until we find one of our named nodes
   let obj = hits[0].object;
   while (obj) {
     if (ALL_NAMES.includes(obj.name)) return obj.name;
@@ -182,7 +187,7 @@ renderer.domElement.addEventListener("pointerdown", (ev) => {
 
 renderer.domElement.addEventListener("pointermove", (ev) => {
   if (!dragging) return;
-  const deltaPx = ev.clientX - dragging.startX;
+  const deltaPx = (ev.clientX - dragging.startX) * DRAG_SIGN[dragging.name];
   const deltaDeg = (deltaPx / DRAG_PIXELS_FOR_FULL_SWING) * MAX_COVER_ANGLE;
   const proposed = THREE.MathUtils.clamp(dragging.startAngle + deltaDeg, 0, allowedMax(dragging.name));
   target[dragging.name] = proposed;
@@ -214,11 +219,24 @@ function animate() {
   requestAnimationFrame(animate);
   const dt = clock.getDelta();
 
-  // continuously re-clamp targets against (possibly still-moving) previous object,
-  // then smoothly lerp current -> target, same order as the chain (front-to-back)
+  // Front-to-back order matters: each name's allowedMax() depends on the
+  // previous name's CURRENT value already being finalized for this frame.
   ["Cover_Front", "Cover_Back", ...PAGE_NAMES].forEach((name) => {
     target[name] = THREE.MathUtils.clamp(target[name], 0, allowedMax(name));
-    current[name] = THREE.MathUtils.damp(current[name], target[name], LERP_SPEED, dt);
+
+    if (dragging && dragging.name === name) {
+      // the object you're actively holding gets smooth, weighted motion
+      current[name] = THREE.MathUtils.damp(current[name], target[name], LERP_SPEED, dt);
+    } else {
+      // everything else (pages just being pushed along by the clamp) snaps
+      // instantly so it can never lag behind and "phase" through its neighbor
+      current[name] = Math.min(current[name], allowedMax(name));
+      if (!dragging) {
+        // when nothing is being dragged, ease everything back toward its target too
+        current[name] = THREE.MathUtils.damp(current[name], target[name], LERP_SPEED, dt);
+      }
+    }
+
     const obj = nodes[name];
     if (obj) applyRotation(name, obj);
   });
