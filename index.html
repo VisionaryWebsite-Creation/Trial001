@@ -5,12 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>3D Book</title>
 <style>
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #1a1a1a; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #1a1a1a; touch-action: none; }
   #canvas-container { width: 100%; height: 100%; }
   #status {
     position: fixed; top: 12px; left: 12px; color: #ddd;
     font-family: system-ui, sans-serif; font-size: 14px;
     background: rgba(0,0,0,0.5); padding: 6px 10px; border-radius: 6px;
+    max-width: 60vw;
   }
 </style>
 </head>
@@ -36,68 +37,71 @@ import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 const container = document.getElementById("canvas-container");
 const statusEl = document.getElementById("status");
 
-// ---------- Renderer ----------
+// ============================================================
+// CONFIG -- matches your Blender rig
+// ============================================================
+const NUM_LEAVES = 15;
+const MAX_COVER_ANGLE = 155;      // degrees, same as Blender
+const ROTATION_AXIS = "y";        // Blender Z-rotation usually becomes Three.js Y after glTF export
+const DRAG_PIXELS_FOR_FULL_SWING = 260; // drag this many px sideways = full 0-155 deg swing; tune to taste
+const LERP_SPEED = 10;            // higher = snappier follow, lower = more "weighted"/laggy feel
+
+// Order matters: each page is clamped by the one before it. Page 1 is clamped by Cover_Front.
+const PAGE_NAMES = Array.from({ length: NUM_LEAVES }, (_, i) => `Page_${String(i + 1).padStart(2, "0")}`);
+const ALL_NAMES = ["Cover_Front", "Cover_Back", ...PAGE_NAMES];
+
+// current (smoothed) and target angles in degrees, per object name
+const current = {};
+const target = {};
+ALL_NAMES.forEach((n) => { current[n] = 0; target[n] = 0; });
+
+// ============================================================
+// Renderer / Scene / Camera
+// ============================================================
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setSize(container.clientWidth, container.clientHeight);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.0;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 container.appendChild(renderer.domElement);
 
-// ---------- Scene / Camera ----------
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x1a1a1a);
 
-const camera = new THREE.PerspectiveCamera(
-  40,
-  container.clientWidth / container.clientHeight,
-  0.01,
-  10
-);
+const camera = new THREE.PerspectiveCamera(40, container.clientWidth / container.clientHeight, 0.01, 10);
 camera.position.set(0.35, 0.25, 0.45);
 
-// ---------- Studio-style environment lighting (no external HDRI file needed) ----------
 const pmremGenerator = new THREE.PMREMGenerator(renderer);
 scene.environment = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
 
-// A couple of extra lights to add some directional shading/shadow feel on top of the environment
 const keyLight = new THREE.DirectionalLight(0xffffff, 1.2);
 keyLight.position.set(1, 1.5, 1);
 scene.add(keyLight);
-
 const fillLight = new THREE.DirectionalLight(0xffffff, 0.4);
 fillLight.position.set(-1, 0.5, -0.5);
 scene.add(fillLight);
 
-// ---------- Camera controls (temporary -- just to look at it for now) ----------
 const controls = new OrbitControls(camera, renderer.domElement);
-controls.target.set(0, 0, 0);
 controls.enableDamping = true;
 controls.dampingFactor = 0.08;
-controls.minDistance = 0.15;
-controls.maxDistance = 1.0;
-controls.update();
 
-// ---------- Load the book ----------
-// IMPORTANT: put your exported .glb next to this index.html and update the filename below
+// ============================================================
+// Load book
+// ============================================================
 const GLB_PATH = "book.glb";
-
 const loader = new GLTFLoader();
-let bookRoot = null;
+const nodes = {}; // name -> Object3D
 
 loader.load(
   GLB_PATH,
   (gltf) => {
-    bookRoot = gltf.scene;
+    const bookRoot = gltf.scene;
     scene.add(bookRoot);
 
-    // Auto-center and auto-frame the camera based on the model's actual size,
-    // since we don't know your book's exact export scale/position yet.
     const box = new THREE.Box3().setFromObject(bookRoot);
     const size = box.getSize(new THREE.Vector3());
     const center = box.getCenter(new THREE.Vector3());
-    bookRoot.position.sub(center); // recenter model at origin
+    bookRoot.position.sub(center);
 
     const maxDim = Math.max(size.x, size.y, size.z);
     camera.position.set(maxDim * 1.4, maxDim * 1.0, maxDim * 1.8);
@@ -106,15 +110,17 @@ loader.load(
     controls.maxDistance = maxDim * 4;
     controls.update();
 
-    statusEl.textContent = "Loaded. Objects found: " +
-      countNamedObjects(bookRoot);
-    console.log("Book hierarchy:", bookRoot);
+    let found = 0;
+    ALL_NAMES.forEach((name) => {
+      const obj = bookRoot.getObjectByName(name);
+      if (obj) { nodes[name] = obj; found++; }
+      else console.warn(`Could not find node named "${name}" in the GLB.`);
+    });
+
+    statusEl.textContent = `Loaded. Found ${found}/${ALL_NAMES.length} controllable parts. Drag the cover to open.`;
   },
   (progress) => {
-    if (progress.total) {
-      const pct = Math.round((progress.loaded / progress.total) * 100);
-      statusEl.textContent = `Loading book... ${pct}%`;
-    }
+    if (progress.total) statusEl.textContent = `Loading book... ${Math.round((progress.loaded / progress.total) * 100)}%`;
   },
   (error) => {
     statusEl.textContent = "Failed to load book.glb -- check filename/path (see console).";
@@ -122,22 +128,101 @@ loader.load(
   }
 );
 
-function countNamedObjects(root) {
-  let n = 0;
-  root.traverse((obj) => { if (obj.isMesh) n++; });
-  return n;
+// ============================================================
+// Angle application (mirrors the Blender driver logic)
+// ============================================================
+function allowedMax(name) {
+  if (name === "Cover_Front" || name === "Cover_Back") return MAX_COVER_ANGLE;
+  const idx = PAGE_NAMES.indexOf(name);
+  const prevName = idx === 0 ? "Cover_Front" : PAGE_NAMES[idx - 1];
+  return current[prevName] ?? 0;
 }
 
-// ---------- Resize handling ----------
+function applyRotation(name, obj) {
+  const deg = current[name];
+  const sign = name === "Cover_Back" ? 1 : -1; // Cover_Back opens the opposite way, matching Blender
+  obj.rotation[ROTATION_AXIS] = sign * THREE.MathUtils.degToRad(deg);
+}
+
+// ============================================================
+// Drag interaction
+// ============================================================
+const raycaster = new THREE.Raycaster();
+const pointerNDC = new THREE.Vector2();
+let dragging = null; // { name, startX, startAngle }
+
+function setPointerFromEvent(ev) {
+  const rect = renderer.domElement.getBoundingClientRect();
+  pointerNDC.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
+  pointerNDC.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
+}
+
+function pickControllableName(ev) {
+  setPointerFromEvent(ev);
+  raycaster.setFromCamera(pointerNDC, camera);
+  const meshes = Object.values(nodes);
+  const hits = raycaster.intersectObjects(meshes, true);
+  if (hits.length === 0) return null;
+  // walk up from the hit object until we find one of our named nodes
+  let obj = hits[0].object;
+  while (obj) {
+    if (ALL_NAMES.includes(obj.name)) return obj.name;
+    obj = obj.parent;
+  }
+  return null;
+}
+
+renderer.domElement.addEventListener("pointerdown", (ev) => {
+  const name = pickControllableName(ev);
+  if (!name) return; // missed the book -- let OrbitControls handle camera as normal
+  dragging = { name, startX: ev.clientX, startAngle: current[name] };
+  controls.enabled = false;
+  renderer.domElement.setPointerCapture(ev.pointerId);
+});
+
+renderer.domElement.addEventListener("pointermove", (ev) => {
+  if (!dragging) return;
+  const deltaPx = ev.clientX - dragging.startX;
+  const deltaDeg = (deltaPx / DRAG_PIXELS_FOR_FULL_SWING) * MAX_COVER_ANGLE;
+  const proposed = THREE.MathUtils.clamp(dragging.startAngle + deltaDeg, 0, allowedMax(dragging.name));
+  target[dragging.name] = proposed;
+});
+
+function endDrag(ev) {
+  if (!dragging) return;
+  try { renderer.domElement.releasePointerCapture(ev.pointerId); } catch (e) {}
+  dragging = null;
+  controls.enabled = true;
+}
+renderer.domElement.addEventListener("pointerup", endDrag);
+renderer.domElement.addEventListener("pointercancel", endDrag);
+
+// ============================================================
+// Resize
+// ============================================================
 window.addEventListener("resize", () => {
   camera.aspect = container.clientWidth / container.clientHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(container.clientWidth, container.clientHeight);
 });
 
-// ---------- Render loop ----------
+// ============================================================
+// Render loop
+// ============================================================
+const clock = new THREE.Clock();
 function animate() {
   requestAnimationFrame(animate);
+  const dt = clock.getDelta();
+
+  // continuously re-clamp targets against (possibly still-moving) previous object,
+  // then smoothly lerp current -> target, same order as the chain (front-to-back)
+  ["Cover_Front", "Cover_Back", ...PAGE_NAMES].forEach((name) => {
+    target[name] = THREE.MathUtils.clamp(target[name], 0, allowedMax(name));
+    current[name] = THREE.MathUtils.damp(current[name], target[name], LERP_SPEED, dt);
+    const obj = nodes[name];
+    if (obj) applyRotation(name, obj);
+  });
+
   controls.update();
   renderer.render(scene, camera);
 }
