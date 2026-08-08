@@ -41,22 +41,24 @@ const statusEl = document.getElementById("status");
 // CONFIG -- matches your Blender rig
 // ============================================================
 const NUM_LEAVES = 15;
-const MAX_COVER_ANGLE = 155;      // degrees, same as Blender
-const ROTATION_AXIS = "y";        // Blender Z-rotation usually becomes Three.js Y after glTF export
-const DRAG_PIXELS_FOR_FULL_SWING = 260; // drag this many px sideways = full 0-155 deg swing; tune to taste
-const LERP_SPEED = 10;            // higher = snappier follow, lower = more "weighted"/laggy feel -- only applies to the object you're actively dragging
+const MAX_COVER_ANGLE = 155;
+const ROTATION_AXIS = "y";
+const DRAG_PIXELS_FOR_FULL_SWING = 260;
+const LERP_SPEED = 10;
 
-// Order matters: each page is clamped by the one before it. Page 1 is clamped by Cover_Front.
+// ---- Lighting/material tuning (this is what fixes the white-out) ----
+const TONE_EXPOSURE = 0.85;      // overall brightness -- lower if still blowing out
+const ENV_MAP_INTENSITY = 0.25;  // how strongly the room-reflection affects materials -- lower = less glare
+const KEY_LIGHT_INTENSITY = 0.6; // was 1.2
+const FILL_LIGHT_INTENSITY = 0.25; // was 0.4
+const MIN_ROUGHNESS = 0.65;      // force materials to be less glossy/mirror-like
+
 const PAGE_NAMES = Array.from({ length: NUM_LEAVES }, (_, i) => `Page_${String(i + 1).padStart(2, "0")}`);
 const ALL_NAMES = ["Cover_Front", "Cover_Back", ...PAGE_NAMES];
 
-// Which way a rightward mouse-drag should count for each object.
-// Front cover + all pages open on drag LEFT (per your report); back cover already correct on drag LEFT too,
-// but its underlying rotation sign is opposite -- see applyRotation().
 const DRAG_SIGN = { Cover_Front: -1, Cover_Back: 1 };
 PAGE_NAMES.forEach((n) => { DRAG_SIGN[n] = -1; });
 
-// current (smoothed) and target angles in degrees, per object name
 const current = {};
 const target = {};
 ALL_NAMES.forEach((n) => { current[n] = 0; target[n] = 0; });
@@ -68,6 +70,7 @@ const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setSize(container.clientWidth, container.clientHeight);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = TONE_EXPOSURE;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 container.appendChild(renderer.domElement);
 
@@ -80,12 +83,13 @@ camera.position.set(0.35, 0.25, 0.45);
 const pmremGenerator = new THREE.PMREMGenerator(renderer);
 scene.environment = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
 
-const keyLight = new THREE.DirectionalLight(0xffffff, 1.2);
+const keyLight = new THREE.DirectionalLight(0xffffff, KEY_LIGHT_INTENSITY);
 keyLight.position.set(1, 1.5, 1);
 scene.add(keyLight);
-const fillLight = new THREE.DirectionalLight(0xffffff, 0.4);
+const fillLight = new THREE.DirectionalLight(0xffffff, FILL_LIGHT_INTENSITY);
 fillLight.position.set(-1, 0.5, -0.5);
 scene.add(fillLight);
+scene.add(new THREE.AmbientLight(0xffffff, 0.3));
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
@@ -96,13 +100,26 @@ controls.dampingFactor = 0.08;
 // ============================================================
 const GLB_PATH = "book.glb";
 const loader = new GLTFLoader();
-const nodes = {}; // name -> Object3D
+const nodes = {};
 
 loader.load(
   GLB_PATH,
   (gltf) => {
     const bookRoot = gltf.scene;
     scene.add(bookRoot);
+
+    // Tame material glossiness on every mesh so grazing-angle reflections
+    // don't blow the texture out to white as pages rotate.
+    bookRoot.traverse((obj) => {
+      if (obj.isMesh && obj.material) {
+        const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+        mats.forEach((m) => {
+          if ("roughness" in m) m.roughness = Math.max(m.roughness, MIN_ROUGHNESS);
+          if ("metalness" in m) m.metalness = Math.min(m.metalness, 0.05);
+          if ("envMapIntensity" in m) m.envMapIntensity = ENV_MAP_INTENSITY;
+        });
+      }
+    });
 
     const box = new THREE.Box3().setFromObject(bookRoot);
     const size = box.getSize(new THREE.Vector3());
@@ -135,7 +152,7 @@ loader.load(
 );
 
 // ============================================================
-// Angle application (mirrors the Blender driver logic)
+// Angle application
 // ============================================================
 function allowedMax(name) {
   if (name === "Cover_Front" || name === "Cover_Back") return MAX_COVER_ANGLE;
@@ -146,7 +163,7 @@ function allowedMax(name) {
 
 function applyRotation(name, obj) {
   const deg = current[name];
-  const sign = name === "Cover_Back" ? 1 : -1; // Cover_Back opens the opposite way, matching Blender
+  const sign = name === "Cover_Back" ? 1 : -1;
   obj.rotation[ROTATION_AXIS] = sign * THREE.MathUtils.degToRad(deg);
 }
 
@@ -155,7 +172,7 @@ function applyRotation(name, obj) {
 // ============================================================
 const raycaster = new THREE.Raycaster();
 const pointerNDC = new THREE.Vector2();
-let dragging = null; // { name, startX, startAngle }
+let dragging = null;
 
 function setPointerFromEvent(ev) {
   const rect = renderer.domElement.getBoundingClientRect();
@@ -179,7 +196,7 @@ function pickControllableName(ev) {
 
 renderer.domElement.addEventListener("pointerdown", (ev) => {
   const name = pickControllableName(ev);
-  if (!name) return; // missed the book -- let OrbitControls handle camera as normal
+  if (!name) return;
   dragging = { name, startX: ev.clientX, startAngle: current[name] };
   controls.enabled = false;
   renderer.domElement.setPointerCapture(ev.pointerId);
@@ -219,20 +236,14 @@ function animate() {
   requestAnimationFrame(animate);
   const dt = clock.getDelta();
 
-  // Front-to-back order matters: each name's allowedMax() depends on the
-  // previous name's CURRENT value already being finalized for this frame.
   ["Cover_Front", "Cover_Back", ...PAGE_NAMES].forEach((name) => {
     target[name] = THREE.MathUtils.clamp(target[name], 0, allowedMax(name));
 
     if (dragging && dragging.name === name) {
-      // the object you're actively holding gets smooth, weighted motion
       current[name] = THREE.MathUtils.damp(current[name], target[name], LERP_SPEED, dt);
     } else {
-      // everything else (pages just being pushed along by the clamp) snaps
-      // instantly so it can never lag behind and "phase" through its neighbor
       current[name] = Math.min(current[name], allowedMax(name));
       if (!dragging) {
-        // when nothing is being dragged, ease everything back toward its target too
         current[name] = THREE.MathUtils.damp(current[name], target[name], LERP_SPEED, dt);
       }
     }
