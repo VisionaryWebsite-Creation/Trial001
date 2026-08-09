@@ -1,257 +1,195 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>3D Book</title>
+<meta charset="utf-8">
+<title>3D Book Viewer</title>
 <style>
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #1a1a1a; touch-action: none; }
-  #canvas-container { width: 100%; height: 100%; }
-  #status {
-    position: fixed; top: 12px; left: 12px; color: #ddd;
-    font-family: system-ui, sans-serif; font-size: 14px;
-    background: rgba(0,0,0,0.5); padding: 6px 10px; border-radius: 6px;
-    max-width: 60vw;
-  }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #222; }
+  #hint { position: fixed; top: 10px; left: 10px; color: #ccc; font: 13px sans-serif; }
 </style>
 </head>
 <body>
-<div id="canvas-container"></div>
-<div id="status">Loading book...</div>
-
+<div id="hint">Drag the front cover or a page edge to open/close it. Scroll to zoom, right-drag to orbit.</div>
 <script type="importmap">
 {
   "imports": {
-    "three": "https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.js",
-    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.165.0/examples/jsm/"
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
   }
 }
 </script>
-
 <script type="module">
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
-
-const container = document.getElementById("canvas-container");
-const statusEl = document.getElementById("status");
 
 // ============================================================
-// CONFIG -- matches your Blender rig
+// CONFIG — must match the Blender build
 // ============================================================
-const NUM_LEAVES = 15;
-const MAX_COVER_ANGLE = 155;
-const ROTATION_AXIS = "y";
-const DRAG_PIXELS_FOR_FULL_SWING = 260;
-const LERP_SPEED = 10;
+const N_LEAVES = 100;
+const GLB_PATH = "book.glb"; // put book.glb next to this html file to test locally
 
-// ---- Lighting/material tuning (this is what fixes the white-out) ----
-const TONE_EXPOSURE = 0.85;      // overall brightness -- lower if still blowing out
-const ENV_MAP_INTENSITY = 0.25;  // how strongly the room-reflection affects materials -- lower = less glare
-const KEY_LIGHT_INTENSITY = 0.6; // was 1.2
-const FILL_LIGHT_INTENSITY = 0.25; // was 0.4
-const MIN_ROUGHNESS = 0.65;      // force materials to be less glossy/mirror-like
-
-const PAGE_NAMES = Array.from({ length: NUM_LEAVES }, (_, i) => `Page_${String(i + 1).padStart(2, "0")}`);
-const ALL_NAMES = ["Cover_Front", "Cover_Back", ...PAGE_NAMES];
-
-const DRAG_SIGN = { Cover_Front: -1, Cover_Back: 1 };
-PAGE_NAMES.forEach((n) => { DRAG_SIGN[n] = -1; });
-
-const current = {};
-const target = {};
-ALL_NAMES.forEach((n) => { current[n] = 0; target[n] = 0; });
+// Blender's local Z rotation (our hinge axis) becomes local Y after the
+// standard Z-up -> Y-up glTF export conversion.
+// If the cover opens the WRONG way once you test this, flip COVER_SIGN.
+// If pages open the wrong way (independent of the cover), flip PAGE_SIGN.
+const COVER_SIGN = 1;
+const PAGE_SIGN = -1;
 
 // ============================================================
-// Renderer / Scene / Camera
+// SCENE
 // ============================================================
-const renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true });
-renderer.setPixelRatio(window.devicePixelRatio);
-renderer.setSize(container.clientWidth, container.clientHeight);
-renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = TONE_EXPOSURE;
-renderer.outputColorSpace = THREE.SRGBColorSpace;
-container.appendChild(renderer.domElement);
-
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x1a1a1a);
+scene.background = new THREE.Color(0x222222);
 
-const camera = new THREE.PerspectiveCamera(40, container.clientWidth / container.clientHeight, 0.05, 2.5);
-camera.position.set(0.35, 0.25, 0.45);
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.01, 100);
+camera.position.set(0, 8, 18);
 
-const pmremGenerator = new THREE.PMREMGenerator(renderer);
-scene.environment = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
-
-const keyLight = new THREE.DirectionalLight(0xffffff, KEY_LIGHT_INTENSITY);
-keyLight.position.set(1, 1.5, 1);
-scene.add(keyLight);
-const fillLight = new THREE.DirectionalLight(0xffffff, FILL_LIGHT_INTENSITY);
-fillLight.position.set(-1, 0.5, -0.5);
-scene.add(fillLight);
-scene.add(new THREE.AmbientLight(0xffffff, 0.3));
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(window.devicePixelRatio);
+document.body.appendChild(renderer.domElement);
 
 const controls = new OrbitControls(camera, renderer.domElement);
-controls.enableDamping = true;
-controls.dampingFactor = 0.08;
+controls.target.set(0, 0, 0);
+controls.mouseButtons = { LEFT: null, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE };
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+sun.position.set(5, 10, 8);
+scene.add(sun);
+
+window.addEventListener("resize", () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
 
 // ============================================================
-// Load book
+// LOAD BOOK
 // ============================================================
-const GLB_PATH = "book.glb";
-const loader = new GLTFLoader();
-const nodes = {};
+let bookRoot = null;
+let frontCover = null;
+let backCover = null;
+const pages = []; // pages[0] = Page_001, ... in order
 
-loader.load(
-  GLB_PATH,
-  (gltf) => {
-    const bookRoot = gltf.scene;
-    scene.add(bookRoot);
+// Each rotating part has: node (the Object3D), target (degrees the user
+// is asking for), and actual (degrees it's actually allowed, after
+// clamping against whatever is in front of it in the chain).
+const state = new Map(); // node -> { target, actual, sign }
 
-    // Tame material glossiness on every mesh so grazing-angle reflections
-    // don't blow the texture out to white as pages rotate.
-    bookRoot.traverse((obj) => {
-      if (obj.isMesh && obj.material) {
-        const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
-        mats.forEach((m) => {
-          if ("roughness" in m) m.roughness = Math.max(m.roughness, MIN_ROUGHNESS);
-          if ("metalness" in m) m.metalness = Math.min(m.metalness, 0.05);
-          if ("envMapIntensity" in m) m.envMapIntensity = ENV_MAP_INTENSITY;
-        });
-      }
-    });
+function nameFor(i) {
+  return "Page_" + String(i + 1).padStart(3, "0");
+}
 
-    const box = new THREE.Box3().setFromObject(bookRoot);
-    const size = box.getSize(new THREE.Vector3());
-    const center = box.getCenter(new THREE.Vector3());
-    bookRoot.position.sub(center);
+new GLTFLoader().load(GLB_PATH, (gltf) => {
+  scene.add(gltf.scene);
+  bookRoot = gltf.scene.getObjectByName("Book_Root") || gltf.scene;
 
-    const maxDim = Math.max(size.x, size.y, size.z);
-    camera.position.set(maxDim * 1.4, maxDim * 1.0, maxDim * 1.8);
-    controls.target.set(0, 0, 0);
-    controls.minDistance = maxDim * 0.5;
-    controls.maxDistance = maxDim * 4;
-    controls.update();
+  frontCover = gltf.scene.getObjectByName("Front_Cover");
+  backCover = gltf.scene.getObjectByName("Back_Cover");
 
-    let found = 0;
-    ALL_NAMES.forEach((name) => {
-      const obj = bookRoot.getObjectByName(name);
-      if (obj) { nodes[name] = obj; found++; }
-      else console.warn(`Could not find node named "${name}" in the GLB.`);
-    });
+  state.set(frontCover, { target: 0, actual: 0, sign: COVER_SIGN, parent: null });
 
-    statusEl.textContent = `Loaded. Found ${found}/${ALL_NAMES.length} controllable parts. Drag the cover to open.`;
-  },
-  (progress) => {
-    if (progress.total) statusEl.textContent = `Loading book... ${Math.round((progress.loaded / progress.total) * 100)}%`;
-  },
-  (error) => {
-    statusEl.textContent = "Failed to load book.glb -- check filename/path (see console).";
-    console.error(error);
+  for (let i = 0; i < N_LEAVES; i++) {
+    const node = gltf.scene.getObjectByName(nameFor(i));
+    if (!node) { console.warn("Missing node:", nameFor(i)); continue; }
+    pages.push(node);
+    const parentNode = i === 0 ? frontCover : pages[i - 1];
+    state.set(node, { target: 0, actual: 0, sign: PAGE_SIGN, parent: parentNode });
   }
-);
+
+  recomputeChain();
+  console.log("Book loaded:", pages.length, "pages found.");
+}, undefined, (err) => console.error("Failed to load", GLB_PATH, err));
 
 // ============================================================
-// Angle application
+// THE CLAMP / CASCADE RULE
+// (this replaces the old Blender driver expressions)
 // ============================================================
-function allowedMax(name) {
-  if (name === "Cover_Front" || name === "Cover_Back") return MAX_COVER_ANGLE;
-  const idx = PAGE_NAMES.indexOf(name);
-  const prevName = idx === 0 ? "Cover_Front" : PAGE_NAMES[idx - 1];
-  return current[prevName] ?? 0;
+function recomputeChain() {
+  if (!frontCover) return;
+
+  const frontState = state.get(frontCover);
+  frontState.actual = THREE.MathUtils.clamp(frontState.target, 0, 180);
+  frontCover.rotation.y = frontState.sign * THREE.MathUtils.degToRad(frontState.actual);
+
+  for (const page of pages) {
+    const s = state.get(page);
+    const parentS = state.get(s.parent);
+    // a page can never open further than whatever is currently in front of
+    // it — and if that thing closes past where this page currently sits,
+    // this page's ceiling drops too, so it gets carried closed (cascade)
+    s.actual = Math.min(THREE.MathUtils.clamp(s.target, 0, 180), parentS.actual);
+    page.rotation.y = s.sign * THREE.MathUtils.degToRad(s.actual);
+  }
 }
 
-function applyRotation(name, obj) {
-  const deg = current[name];
-  const sign = name === "Cover_Back" ? 1 : -1;
-  obj.rotation[ROTATION_AXIS] = sign * THREE.MathUtils.degToRad(deg);
-}
+// Call this from your own UI/drag code:
+//   setTarget(frontCover, 180)     // open the cover fully
+//   setTarget(pages[0], 90)        // open page 1 halfway (clamped by cover)
+//   setTarget(frontCover, 20)      // close the cover most of the way — any
+//                                     pages currently open past 20 get carried
+//                                     closed with it automatically
+window.setTarget = function (node, degrees) {
+  const s = state.get(node);
+  if (!s) return;
+  s.target = degrees;
+  recomputeChain();
+};
+window.getPage = (i) => pages[i];
+window.frontCover = () => frontCover;
+window.backCover = () => backCover;
 
 // ============================================================
-// Drag interaction
+// BASIC DRAG-TO-OPEN INTERACTION
+// Left-drag horizontally on the front cover or a page to open/close it.
+// This is a straightforward starting point — refine the sensitivity /
+// picking logic to taste once the core rotation is confirmed correct.
 // ============================================================
 const raycaster = new THREE.Raycaster();
-const pointerNDC = new THREE.Vector2();
-let dragging = null;
+const pointer = new THREE.Vector2();
+let dragging = null; // { node, startX, startAngle }
 
-function setPointerFromEvent(ev) {
+function pick(clientX, clientY) {
   const rect = renderer.domElement.getBoundingClientRect();
-  pointerNDC.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
-  pointerNDC.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
-}
-
-function pickControllableName(ev) {
-  setPointerFromEvent(ev);
-  raycaster.setFromCamera(pointerNDC, camera);
-  const meshes = Object.values(nodes);
-  const hits = raycaster.intersectObjects(meshes, true);
+  pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+  pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(pointer, camera);
+  const hits = raycaster.intersectObjects([frontCover, ...pages].filter(Boolean), true);
   if (hits.length === 0) return null;
+  // walk up to the named rotating node (children of the actual mesh)
   let obj = hits[0].object;
-  while (obj) {
-    if (ALL_NAMES.includes(obj.name)) return obj.name;
-    obj = obj.parent;
-  }
-  return null;
+  while (obj && !state.has(obj)) obj = obj.parent;
+  return obj || null;
 }
 
-renderer.domElement.addEventListener("pointerdown", (ev) => {
-  const name = pickControllableName(ev);
-  if (!name) return;
-  dragging = { name, startX: ev.clientX, startAngle: current[name] };
+renderer.domElement.addEventListener("pointerdown", (e) => {
+  if (e.button !== 0) return; // left button only, right-drag reserved for orbit
+  const node = pick(e.clientX, e.clientY);
+  if (!node) return;
+  dragging = { node, startX: e.clientX, startAngle: state.get(node).target };
   controls.enabled = false;
-  renderer.domElement.setPointerCapture(ev.pointerId);
 });
 
-renderer.domElement.addEventListener("pointermove", (ev) => {
+window.addEventListener("pointermove", (e) => {
   if (!dragging) return;
-  const deltaPx = (ev.clientX - dragging.startX) * DRAG_SIGN[dragging.name];
-  const deltaDeg = (deltaPx / DRAG_PIXELS_FOR_FULL_SWING) * MAX_COVER_ANGLE;
-  const proposed = THREE.MathUtils.clamp(dragging.startAngle + deltaDeg, 0, allowedMax(dragging.name));
-  target[dragging.name] = proposed;
+  const dx = e.clientX - dragging.startX;
+  const degreesPerPixel = 0.5; // tune to taste
+  const next = dragging.startAngle + dx * degreesPerPixel;
+  window.setTarget(dragging.node, THREE.MathUtils.clamp(next, 0, 180));
 });
 
-function endDrag(ev) {
-  if (!dragging) return;
-  try { renderer.domElement.releasePointerCapture(ev.pointerId); } catch (e) {}
+window.addEventListener("pointerup", () => {
   dragging = null;
   controls.enabled = true;
-}
-renderer.domElement.addEventListener("pointerup", endDrag);
-renderer.domElement.addEventListener("pointercancel", endDrag);
-
-// ============================================================
-// Resize
-// ============================================================
-window.addEventListener("resize", () => {
-  camera.aspect = container.clientWidth / container.clientHeight;
-  camera.updateProjectionMatrix();
-  renderer.setSize(container.clientWidth, container.clientHeight);
 });
 
 // ============================================================
-// Render loop
+// RENDER LOOP
 // ============================================================
-const clock = new THREE.Clock();
 function animate() {
   requestAnimationFrame(animate);
-  const dt = clock.getDelta();
-
-  ["Cover_Front", "Cover_Back", ...PAGE_NAMES].forEach((name) => {
-    target[name] = THREE.MathUtils.clamp(target[name], 0, allowedMax(name));
-
-    if (dragging && dragging.name === name) {
-      current[name] = THREE.MathUtils.damp(current[name], target[name], LERP_SPEED, dt);
-    } else {
-      current[name] = Math.min(current[name], allowedMax(name));
-      if (!dragging) {
-        current[name] = THREE.MathUtils.damp(current[name], target[name], LERP_SPEED, dt);
-      }
-    }
-
-    const obj = nodes[name];
-    if (obj) applyRotation(name, obj);
-  });
-
   controls.update();
   renderer.render(scene, camera);
 }
