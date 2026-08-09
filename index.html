@@ -33,7 +33,7 @@ const GLB_PATH = "book.glb"; // put book.glb next to this html file to test loca
 // standard Z-up -> Y-up glTF export conversion.
 // If the cover opens the WRONG way once you test this, flip COVER_SIGN.
 // If pages open the wrong way (independent of the cover), flip PAGE_SIGN.
-const COVER_SIGN = 1;
+const COVER_SIGN = -1;
 const PAGE_SIGN = -1;
 
 // ============================================================
@@ -52,7 +52,9 @@ document.body.appendChild(renderer.domElement);
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.target.set(0, 0, 0);
-controls.mouseButtons = { LEFT: null, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE };
+controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE };
+// Left-drag orbits by default; grabbing the cover or a page (see pick())
+// disables controls for the duration of that drag so the two don't fight.
 
 scene.add(new THREE.AmbientLight(0xffffff, 0.6));
 const sun = new THREE.DirectionalLight(0xffffff, 1.2);
@@ -151,12 +153,28 @@ const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
 let dragging = null; // { node, startX, startAngle }
 
+// A page is only grabbable once it's actually reachable: page 1 always is,
+// and any later page becomes grabbable once the page before it has opened
+// at least a little (or is already partway open itself, so you can close
+// it again). This mirrors a real book -- you can't grab page 5 while pages
+// 1-4 are still shut flush on top of it -- and it's what stops a click from
+// accidentally landing on the wrong page when everything is closed flush.
+function grabbableNodes() {
+  const list = [frontCover];
+  pages.forEach((p, i) => {
+    const s = state.get(p);
+    const prevActual = i === 0 ? state.get(frontCover).actual : state.get(pages[i - 1]).actual;
+    if (i === 0 || prevActual > 0.001 || s.actual > 0.001) list.push(p);
+  });
+  return list.filter(Boolean);
+}
+
 function pick(clientX, clientY) {
   const rect = renderer.domElement.getBoundingClientRect();
   pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
   pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
   raycaster.setFromCamera(pointer, camera);
-  const hits = raycaster.intersectObjects([frontCover, ...pages].filter(Boolean), true);
+  const hits = raycaster.intersectObjects(grabbableNodes(), true);
   if (hits.length === 0) return null;
   // walk up to the named rotating node (children of the actual mesh)
   let obj = hits[0].object;
@@ -164,18 +182,22 @@ function pick(clientX, clientY) {
   return obj || null;
 }
 
+// Capture phase + stopImmediatePropagation so we decide whether this is a
+// page-grab BEFORE OrbitControls gets a chance to start its own drag on the
+// same left button.
 renderer.domElement.addEventListener("pointerdown", (e) => {
-  if (e.button !== 0) return; // left button only, right-drag reserved for orbit
+  if (e.button !== 0) return;
   const node = pick(e.clientX, e.clientY);
-  if (!node) return;
+  if (!node) return; // missed the book -> let OrbitControls orbit as normal
   dragging = { node, startX: e.clientX, startAngle: state.get(node).target };
   controls.enabled = false;
-});
+  e.stopImmediatePropagation();
+}, { capture: true });
 
 window.addEventListener("pointermove", (e) => {
   if (!dragging) return;
   const dx = e.clientX - dragging.startX;
-  const degreesPerPixel = 0.5; // tune to taste
+  const degreesPerPixel = -0.5; // negative: dragging LEFT opens, RIGHT closes
   const next = dragging.startAngle + dx * degreesPerPixel;
   window.setTarget(dragging.node, THREE.MathUtils.clamp(next, 0, 180));
 });
