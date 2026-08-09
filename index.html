@@ -36,6 +36,29 @@ const GLB_PATH = "book.glb"; // put book.glb next to this html file to test loca
 const COVER_SIGN = -1;
 const PAGE_SIGN = -1;
 
+// Curl settings for pages while they're mid-turn. This is what keeps a
+// turning page's leading edge from sweeping through the space the next
+// (still-closed) page occupies -- a flat rigid page has no way to avoid
+// that, a curling one does.
+const BEND = {
+  strength: 0.35, // fraction of the page (0-1) that participates in the curl at the peak of the turn
+  radius: 0.6,    // curl radius, in inches
+  turns: 2.0,     // how far the curled portion wraps around, in radians
+  zSign: 1,       // flip to -1 if the curl bulges the wrong way once you see it
+};
+
+// How much a page/cover curls at the midpoint of its swing (radians of
+// extra curl at the very tip, peaking at 90 degrees open, zero at 0 and
+// 180). This is what keeps a page that's longer than the book is thick
+// from sweeping straight through the rest of the book on its way open.
+// Covers are rigid boards in real life so they only get a small crease
+// near the spine, not a full curl.
+const PAGE_BEND_STRENGTH = 0.9;
+const COVER_BEND_STRENGTH = 0.15;
+// If the curl looks backwards (bulging away from the book instead of
+// tucking in toward the spine), flip this to -1.
+const BEND_SIGN = 1;
+
 // ============================================================
 // SCENE
 // ============================================================
@@ -99,11 +122,85 @@ new GLTFLoader().load(GLB_PATH, (gltf) => {
     pages.push(node);
     const parentNode = i === 0 ? frontCover : pages[i - 1];
     state.set(node, { target: 0, actual: 0, sign: PAGE_SIGN, parent: parentNode });
+    setupBendData(node);
   }
 
   recomputeChain();
   console.log("Book loaded:", pages.length, "pages found.");
 }, undefined, (err) => console.error("Failed to load", GLB_PATH, err));
+
+// ============================================================
+// PAGE BENDING
+// A page's local X = distance from the hinge, Z = thickness. We keep a
+// clean flat copy of the vertex positions from load time, and every time a
+// page's angle changes, recompute the live positions from that clean copy
+// (never accumulate bend on top of bend). Only the portion of the page
+// past flatEndT curls; the rest stays perfectly flat against the hinge.
+// ============================================================
+function findMesh(node) {
+  if (node.isMesh) return node;
+  let found = null;
+  node.traverse((child) => { if (!found && child.isMesh) found = child; });
+  return found;
+}
+
+function setupBendData(node) {
+  const mesh = findMesh(node);
+  if (!mesh) { console.warn("No mesh geometry found for", node.name); return; }
+  const geom = mesh.geometry;
+  geom.computeBoundingBox();
+  const bb = geom.boundingBox;
+  const rest = Float32Array.from(geom.attributes.position.array);
+  state.get(node).bend = { mesh, geom, rest, minX: bb.min.x, length: bb.max.x - bb.min.x };
+}
+
+function applyBend(node) {
+  const s = state.get(node);
+  const b = s.bend;
+  if (!b || b.length <= 0) return;
+  const actual = s.actual;
+
+  if (actual <= 0.001 || actual >= 179.999) { resetFlat(node); return; }
+
+  const rollFraction = Math.min(1, Math.sin(THREE.MathUtils.degToRad(actual)) * BEND.strength);
+  const flatEndT = 1 - rollFraction;
+  const arr = b.geom.attributes.position.array;
+  const rest = b.rest;
+
+  for (let i = 0; i < arr.length; i += 3) {
+    const x0 = rest[i] - b.minX;
+    const t = x0 / b.length;
+
+    if (t <= flatEndT || rollFraction <= 0.001) {
+      arr[i] = rest[i];
+      arr[i + 1] = rest[i + 1];
+      arr[i + 2] = rest[i + 2];
+    } else {
+      const s2 = (t - flatEndT) / (1 - flatEndT);
+      const curlAngle = s2 * BEND.turns;
+      arr[i] = b.minX + flatEndT * b.length + BEND.radius * Math.sin(curlAngle);
+      arr[i + 1] = rest[i + 1];
+      arr[i + 2] = rest[i + 2] + BEND.zSign * BEND.radius * (1 - Math.cos(curlAngle));
+    }
+  }
+  b.geom.attributes.position.needsUpdate = true;
+  b.geom.computeVertexNormals();
+}
+
+function resetFlat(node) {
+  const s = state.get(node);
+  const b = s.bend;
+  if (!b) return;
+  const arr = b.geom.attributes.position.array;
+  let alreadyFlat = true;
+  for (let i = 0; i < arr.length; i++) {
+    if (arr[i] !== b.rest[i]) { alreadyFlat = false; break; }
+  }
+  if (alreadyFlat) return;
+  arr.set(b.rest);
+  b.geom.attributes.position.needsUpdate = true;
+  b.geom.computeVertexNormals();
+}
 
 // ============================================================
 // THE CLAMP / CASCADE RULE
@@ -124,6 +221,7 @@ function recomputeChain() {
     // this page's ceiling drops too, so it gets carried closed (cascade)
     s.actual = Math.min(THREE.MathUtils.clamp(s.target, 0, 180), parentS.actual);
     page.rotation.y = s.sign * THREE.MathUtils.degToRad(s.actual);
+    applyBend(page);
   }
 }
 
